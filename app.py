@@ -1,13 +1,16 @@
 import os
 import json
-from datetime import datetime
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dateutil import parser
-from google import genai
+from openai import OpenAI
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+client = OpenAI(
+    api_key=os.getenv("AIPIPE_TOKEN"),
+    base_url="https://aipipe.org/openai/v1",
+)
 
 app = FastAPI()
 
@@ -30,6 +33,8 @@ def normalize(value, typ):
         return None
 
     try:
+        typ = typ.lower()
+
         if typ == "string":
             return str(value)
 
@@ -42,7 +47,12 @@ def normalize(value, typ):
         if typ == "boolean":
             if isinstance(value, bool):
                 return value
-            return str(value).lower() in ("true", "yes", "1")
+            return str(value).strip().lower() in (
+                "true",
+                "yes",
+                "1",
+                "y",
+            )
 
         if typ == "date":
             return parser.parse(str(value)).strftime("%Y-%m-%d")
@@ -57,19 +67,32 @@ def normalize(value, typ):
                 return [int(x) for x in value]
             return [int(value)]
 
+        if typ == "array[float]":
+            if isinstance(value, list):
+                return [float(x) for x in value]
+            return [float(value)]
+
+        if typ == "array[boolean]":
+            if isinstance(value, list):
+                return [
+                    str(x).lower() in ("true", "yes", "1")
+                    for x in value
+                ]
+            return [str(value).lower() in ("true", "yes", "1")]
+
     except Exception:
         return None
 
-    return None
+    return value
 
 
 @app.post("/dynamic-extract")
 def dynamic_extract(req: DynamicRequest):
 
     prompt = f"""
-Extract structured information.
+You are an information extraction engine.
 
-Return ONLY valid JSON.
+Extract structured information from the text.
 
 TEXT
 
@@ -81,32 +104,32 @@ SCHEMA
 
 Rules
 
-Return EXACTLY the keys in the schema.
-
-No extra keys.
-
-Missing values must be null.
-
-Dates must be YYYY-MM-DD.
-
-Numbers must be JSON numbers.
-
-Arrays must be JSON arrays.
-
-Return only JSON.
+- Return ONLY valid JSON.
+- Return EXACTLY the keys in the schema.
+- Do NOT add extra keys.
+- Missing values must be null.
+- Dates must be YYYY-MM-DD.
+- Numbers must be JSON numbers.
+- Arrays must be JSON arrays.
 """
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        temperature=0,
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": "You extract structured information from text.",
+            },
+            {
+                "role": "user",
+                "content": prompt,
+            },
+        ],
     )
 
-    text = response.text.strip()
-
-    if text.startswith("```"):
-        lines = text.splitlines()
-        lines = [l for l in lines if not l.startswith("```")]
-        text = "\n".join(lines)
+    text = response.choices[0].message.content.strip()
 
     try:
         data = json.loads(text)
